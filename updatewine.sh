@@ -334,19 +334,55 @@ else
     echo "    -> GAGAL mengunduh WebView2"
 fi
 
+# Hentikan layanan Edge Update yang dijalankan installer WebView2
+"$WINESERVER" -k
+sleep 2
+
+echo "=== Konfigurasi WebView2 untuk Wine ===" | tee -a "$LOG"
+
 # Matikan layanan Edge Update (penyebab wineserver tidak pernah idle)
 for svc in edgeupdate edgeupdatem; do
     "$WINE" reg add "HKLM\\System\\CurrentControlSet\\Services\\$svc" \
         /v Start /t REG_DWORD /d 4 /f >>"$LOG" 2>&1
 done
 
-# Workaround halaman WebView2 blank di Wine
-"$WINE" reg add 'HKCU\Software\Wine\AppDefaults\msedgewebview2.exe' \
-    /v Version /d win7 /f >>"$LOG" 2>&1
+# Pastikan seluruh prefix memakai Windows 10 (WebView2 110+ tidak jalan di win7)
+"$WINE" reg add 'HKCU\Software\Wine' /v Version /d win10 /f >>"$LOG" 2>&1
+"$WINE" reg delete 'HKCU\Software\Wine\AppDefaults\msedgewebview2.exe' /f >>"$LOG" 2>&1 || true
 
-# Matikan semua proses agar layanan yang sudah dinonaktifkan benar-benar berhenti
-"$WINESERVER" -k
-sleep 2
+# Argumen WebView2 agar halaman (mis. tab Market di MetaTrader) tidak blank.
+# Lewat registry Policies karena environment variable diabaikan oleh MT.
+WV2_ARGS="--no-sandbox --disable-gpu --disable-gpu-compositing --disable-direct-composition --disable-features=CalculateNativeWinOcclusion"
+WV2_APPS=(terminal64.exe terminal.exe metaeditor64.exe)
+
+for HIVE in HKCU HKLM; do
+    for APP in "${WV2_APPS[@]}"; do
+        "$WINE" reg add "$HIVE\\Software\\Policies\\Microsoft\\Edge\\WebView2\\AdditionalBrowserArguments" \
+            /v "$APP" /d "$WV2_ARGS" /f >>"$LOG" 2>&1
+    done
+done
+
+# Bersihkan profil WebView lama milik MetaTrader (jika prefix sudah berisi MT)
+shopt -s nullglob
+for d in "$WINEPREFIX/drive_c/Program Files/"*/temp/EBWebView \
+         "$WINEPREFIX/drive_c/Program Files (x86)/"*/temp/EBWebView; do
+    rm -rf -- "$d"
+    echo "    Cache dihapus: $d" | tee -a "$LOG"
+done
+shopt -u nullglob
+
+# Tunggu registry tersimpan (jangan langsung -k)
+wait_wine 60
+
+# Verifikasi argumen tersimpan
+if "$WINE" reg query 'HKCU\Software\Policies\Microsoft\Edge\WebView2\AdditionalBrowserArguments' \
+        /v terminal64.exe >>"$LOG" 2>&1; then
+    WV2_POLICY="OK"
+else
+    WV2_POLICY="tidak tersimpan"
+    FAILED+=("registry argumen webview2")
+fi
+wait_wine 30
 
 # Verifikasi WebView2
 WV2_DIR="$WINEPREFIX/drive_c/Program Files (x86)/Microsoft/EdgeWebView/Application"
@@ -367,6 +403,7 @@ echo "===================================="
 echo "Wine     : $("$WINE" --version)"
 echo "Prefix   : $WINEPREFIX"
 echo "WebView2 : ${WV2_VER:-tidak terdeteksi}"
+echo "Argumen  : ${WV2_POLICY:-tidak dicek} (MetaTrader WebView2)"
 echo "Log      : $LOG"
 echo ""
 
