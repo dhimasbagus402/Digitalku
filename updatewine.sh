@@ -2,7 +2,7 @@
 # =====================================================================
 #  Install WineHQ terbaru + corefonts, vcrun2022, dotnet48, WebView2
 #  Mendukung Debian / Ubuntu / turunan Ubuntu (Mint, Pop!_OS, dll.)
-#  Jalankan sebagai user biasa:  ./install-winehq.sh
+#  Jalankan sebagai user biasa:  bash updatewine.sh
 # =====================================================================
 
 # Cabang WineHQ: devel = versi terbaru, stable = versi stabil
@@ -11,7 +11,7 @@ WINE_BRANCH="${WINE_BRANCH:-devel}"
 set -uo pipefail
 
 if [[ "$EUID" -eq 0 ]]; then
-    echo "ERROR: Jangan jalankan dengan sudo. Jalankan: ./install-winehq.sh"
+    echo "ERROR: Jangan jalankan dengan sudo. Jalankan: bash updatewine.sh"
     exit 1
 fi
 
@@ -85,7 +85,11 @@ export WINEDEBUG=-all
 
 # Tunggu Wine selesai, tapi jangan menunggu selamanya
 wait_wine() {
-    timeout "${1:-120}" wineserver -w || { wineserver -k; sleep 2; }
+    if ! timeout "${1:-120}" wineserver -w; then
+        echo "    (proses background Wine masih aktif, dihentikan paksa)"
+        wineserver -k
+        sleep 2
+    fi
 }
 
 FAILED=()
@@ -109,29 +113,66 @@ run ./winetricks -q dotnet48
 run ./winetricks -q win10
 
 # WebView2 langsung dari Microsoft (lebih andal dari verb winetricks)
+# Tidak lewat run(): installer meninggalkan layanan Edge Update yang tidak
+# pernah berhenti, jadi menunggu wineserver idle di sini percuma.
+echo "=== Instal WebView2 Runtime ===" | tee -a "$LOG"
 if wget -qO webview2.exe "https://go.microsoft.com/fwlink/?linkid=2124701"; then
-    run wine webview2.exe /silent /install
+    if wine webview2.exe /silent /install >>"$LOG" 2>&1; then
+        echo "    -> OK"
+    else
+        echo "    -> GAGAL"; FAILED+=("install webview2")
+    fi
 else
-    FAILED+=("download webview2")
+    echo "    -> GAGAL mengunduh"; FAILED+=("download webview2")
 fi
-wineserver -k; sleep 2   # hentikan layanan Edge Update yang dijalankan installer
 
 # ---------------------------------------------------------------------
 # 7. Konfigurasi WebView2 agar jalan di Wine (fix tab Market MetaTrader)
 # ---------------------------------------------------------------------
-for svc in edgeupdate edgeupdatem; do
-    wine reg add "HKLM\\System\\CurrentControlSet\\Services\\$svc" /v Start /t REG_DWORD /d 4 /f >>"$LOG" 2>&1
-done
-wine reg add 'HKCU\Software\Wine' /v Version /d win10 /f >>"$LOG" 2>&1
+echo "=== Konfigurasi WebView2 untuk Wine ==="
 
 WV2_ARGS="--no-sandbox --disable-gpu --disable-gpu-compositing --disable-direct-composition --disable-features=CalculateNativeWinOcclusion"
-for HIVE in HKCU HKLM; do
-    for APP in terminal64.exe terminal.exe metaeditor64.exe; do
-        wine reg add "$HIVE\\Software\\Policies\\Microsoft\\Edge\\WebView2\\AdditionalBrowserArguments" \
-            /v "$APP" /d "$WV2_ARGS" /f >>"$LOG" 2>&1
+WV2_KEY='Software\Policies\Microsoft\Edge\WebView2\AdditionalBrowserArguments'
+
+# Semua setting ditulis dalam satu file .reg -> satu kali start Wine
+REGFILE="$WORK/webview2-wine.reg"
+{
+    echo 'REGEDIT4'
+    echo
+    echo '[HKEY_LOCAL_MACHINE\System\CurrentControlSet\Services\edgeupdate]'
+    echo '"Start"=dword:00000004'
+    echo
+    echo '[HKEY_LOCAL_MACHINE\System\CurrentControlSet\Services\edgeupdatem]'
+    echo '"Start"=dword:00000004'
+    echo
+    echo '[HKEY_CURRENT_USER\Software\Wine]'
+    echo '"Version"="win10"'
+    for HIVE in HKEY_CURRENT_USER HKEY_LOCAL_MACHINE; do
+        echo
+        echo "[$HIVE\\$WV2_KEY]"
+        for APP in terminal64.exe terminal.exe metaeditor64.exe; do
+            echo "\"$APP\"=\"$WV2_ARGS\""
+        done
     done
+} > "$REGFILE"
+
+# Ulangi sampai layanan Edge Update benar-benar mati dan registry tersimpan.
+# Wine baru dianggap selesai bila wineserver bisa keluar normal (= registry tersimpan).
+WV2_POLICY="tidak tersimpan"
+for attempt in 1 2 3; do
+    echo "    Percobaan $attempt: menghentikan Edge Update & menulis registry..."
+    wineserver -k 2>/dev/null; sleep 2
+    wine regedit /S "$(winepath -w "$REGFILE")" >>"$LOG" 2>&1
+    if timeout 30 wineserver -w; then
+        if wine reg query "HKCU\\$WV2_KEY" /v terminal64.exe >>"$LOG" 2>&1; then
+            WV2_POLICY="OK"
+            timeout 30 wineserver -w || wineserver -k
+            break
+        fi
+    fi
 done
-wait_wine 60
+echo "    -> Argumen WebView2: $WV2_POLICY"
+[[ "$WV2_POLICY" == "OK" ]] || FAILED+=("registry argumen webview2")
 
 # ---------------------------------------------------------------------
 # Ringkasan
@@ -146,6 +187,7 @@ echo " SELESAI"
 echo "===================================="
 echo "Wine     : $(wine --version)"
 echo "WebView2 : ${WV2_VER:-tidak terdeteksi}"
+echo "Argumen  : $WV2_POLICY (MetaTrader WebView2)"
 echo "Log      : $LOG"
 if (( ${#FAILED[@]} )); then
     echo "GAGAL:"; printf '  - %s\n' "${FAILED[@]}"
