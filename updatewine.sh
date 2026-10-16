@@ -294,7 +294,17 @@ chmod +x winetricks
 # Inisialisasi prefix
 echo "=== Inisialisasi prefix ($WINEPREFIX) ==="
 "$WINE" wineboot -i >>"$LOG" 2>&1
-"$WINESERVER" -w
+timeout 120 "$WINESERVER" -w || "$WINESERVER" -k
+
+# Tunggu proses Wine selesai, tapi jangan menunggu selamanya
+# (layanan background seperti Edge Update tidak pernah berhenti sendiri)
+wait_wine() {
+    if ! timeout "${1:-60}" "$WINESERVER" -w; then
+        echo "    (proses background Wine masih aktif, dihentikan paksa)" | tee -a "$LOG"
+        "$WINESERVER" -k
+        sleep 2
+    fi
+}
 
 FAILED=()
 run() {
@@ -305,7 +315,7 @@ run() {
     else
         echo "    -> OK"
     fi
-    "$WINESERVER" -w
+    wait_wine 120
 }
 
 run ./winetricks -q corefonts
@@ -324,10 +334,19 @@ else
     echo "    -> GAGAL mengunduh WebView2"
 fi
 
+# Matikan layanan Edge Update (penyebab wineserver tidak pernah idle)
+for svc in edgeupdate edgeupdatem; do
+    "$WINE" reg add "HKLM\\System\\CurrentControlSet\\Services\\$svc" \
+        /v Start /t REG_DWORD /d 4 /f >>"$LOG" 2>&1
+done
+
 # Workaround halaman WebView2 blank di Wine
 "$WINE" reg add 'HKCU\Software\Wine\AppDefaults\msedgewebview2.exe' \
     /v Version /d win7 /f >>"$LOG" 2>&1
-"$WINESERVER" -w
+
+# Matikan semua proses agar layanan yang sudah dinonaktifkan benar-benar berhenti
+"$WINESERVER" -k
+sleep 2
 
 # Verifikasi WebView2
 WV2_DIR="$WINEPREFIX/drive_c/Program Files (x86)/Microsoft/EdgeWebView/Application"
