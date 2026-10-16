@@ -1,5 +1,14 @@
-sudo bash <<'EOF'
+#!/usr/bin/env bash
+# DIGIOS - WINEHQ FRESH INSTALLER (Debian 13 Trixie)
+# Jalankan: bash updatewine2.sh   (otomatis minta sudo)
+
 set -Eeuo pipefail
+
+# Naikkan ke root otomatis jika belum
+if [[ $EUID -ne 0 ]]; then
+    exec sudo -E bash "$0" "$@"
+fi
+
 export DEBIAN_FRONTEND=noninteractive
 
 echo "===================================="
@@ -17,7 +26,7 @@ fi
 USER_NAME="${SUDO_USER:-}"
 
 if [[ -z "$USER_NAME" || "$USER_NAME" == "root" ]]; then
-    echo "ERROR: Jalankan dari akun admin dengan sudo."
+    echo "ERROR: Jalankan dari akun admin (bukan root langsung)."
     exit 1
 fi
 
@@ -50,7 +59,7 @@ get_wine_pids() {
            [[ "$exe" == /usr/lib/wine/* ]]; then
             echo "$pid"
         fi
-    done < <(ps -u "$USER_UID" -o pid=,comm=)
+    done < <(ps -u "$USER_UID" -o pid=,comm= || true)
 }
 
 mapfile -t WINE_PIDS < <(get_wine_pids)
@@ -192,6 +201,7 @@ for cmd in wine wineboot winecfg wineserver; do
 done
 
 # 11. Hapus prefix lama
+# PERINGATAN: ini menghapus semua instalasi aplikasi Windows (termasuk MT4/MT5) di prefix berikut.
 echo "=== Membersihkan prefix Wine lama ==="
 
 for prefix in \
@@ -228,6 +238,5 @@ echo ""
 echo "Untuk inisialisasi Wine:"
 echo "/opt/wine-devel/bin/wineboot -i"
 echo ""
+echo "Jika shell masih memakai wine lama, jalankan: hash -r"
 echo "===================================="
-EOF
-hash -r
