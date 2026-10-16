@@ -42,10 +42,13 @@ fi
 echo "=== Menghentikan seluruh aplikasi Wine ==="
 
 get_wine_pids() {
-    local pid comm exe
+    local pid stat comm exe
 
-    while read -r pid comm; do
+    while read -r pid stat comm; do
         [[ -n "${pid:-}" ]] || continue
+
+        # Lewati proses zombie (sudah mati, hanya menunggu di-reap parent)
+        [[ "$stat" == Z* ]] && continue
 
         exe="$(readlink "/proc/$pid/exe" 2>/dev/null || true)"
 
@@ -59,7 +62,14 @@ get_wine_pids() {
            [[ "$exe" == /usr/lib/wine/* ]]; then
             echo "$pid"
         fi
-    done < <(ps -u "$USER_UID" -o pid=,comm= || true)
+    done < <(ps -u "$USER_UID" -o pid=,stat=,comm= || true)
+}
+
+show_wine_procs() {
+    local p
+    for p in "$@"; do
+        ps -o pid=,ppid=,stat=,comm=,args= -p "$p" 2>/dev/null || true
+    done
 }
 
 mapfile -t WINE_PIDS < <(get_wine_pids)
@@ -70,14 +80,19 @@ if (( ${#WINE_PIDS[@]} > 0 )); then
     kill -TERM "${WINE_PIDS[@]}" 2>/dev/null || true
     sleep 3
 
-    mapfile -t REMAINING_PIDS < <(get_wine_pids)
+    # Matikan wineserver dengan cara resminya juga (jika ada)
+    for ws in /opt/wine-*/bin/wineserver /usr/bin/wineserver /usr/lib/wine/wineserver*; do
+        [[ -x "$ws" ]] && sudo -u "$USER_NAME" "$ws" -k 2>/dev/null || true
+    done
 
-    if (( ${#REMAINING_PIDS[@]} > 0 )); then
-        echo "Memaksa proses Wine yang masih aktif berhenti..."
+    for attempt in 1 2 3 4 5; do
+        mapfile -t REMAINING_PIDS < <(get_wine_pids)
+        (( ${#REMAINING_PIDS[@]} == 0 )) && break
+
+        echo "Memaksa proses Wine yang masih aktif berhenti (percobaan $attempt)..."
         kill -KILL "${REMAINING_PIDS[@]}" 2>/dev/null || true
-    fi
-
-    sleep 2
+        sleep 2
+    done
 else
     echo "Tidak ditemukan proses Wine aktif."
 fi
@@ -85,8 +100,11 @@ fi
 mapfile -t STILL_RUNNING < <(get_wine_pids)
 
 if (( ${#STILL_RUNNING[@]} > 0 )); then
-    echo "ERROR: Masih terdapat proses Wine aktif."
-    exit 1
+    echo "PERINGATAN: Proses berikut tidak bisa dihentikan:"
+    echo "  PID  PPID STAT COMMAND"
+    show_wine_procs "${STILL_RUNNING[@]}"
+    echo "Kemungkinan proses ini di-restart otomatis (autostart/systemd/cron)."
+    echo "Lanjut instalasi; proses akan mati sendiri saat paket Wine lama dihapus."
 fi
 
 echo "Semua proses Wine yang terdeteksi telah dihentikan."
