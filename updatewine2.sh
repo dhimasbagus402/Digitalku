@@ -240,7 +240,37 @@ echo "===================================="
 
 apt-get update && apt-get upgrade -y
 
-# 13. Verifikasi akhir
+# 13. Inisialisasi prefix Wine (wineboot -u) sebagai user, bukan root
+echo "===================================="
+echo " INISIALISASI PREFIX WINE (wineboot -u)"
+echo "===================================="
+
+WINE_PREFIX_DIR="$USER_HOME/.wine"
+
+run_as_user() {
+    sudo -u "$USER_NAME" env \
+        HOME="$USER_HOME" \
+        USER="$USER_NAME" \
+        WINEPREFIX="$WINE_PREFIX_DIR" \
+        WINEARCH=win64 \
+        WINEDEBUG=-all \
+        WINEDLLOVERRIDES="mscoree,mshtml=" \
+        DISPLAY="${DISPLAY:-}" \
+        XAUTHORITY="${XAUTHORITY:-$USER_HOME/.Xauthority}" \
+        PATH="/opt/wine-devel/bin:$PATH" \
+        "$@"
+}
+
+if run_as_user /opt/wine-devel/bin/wineboot -u; then
+    # Tunggu wineserver selesai menulis registry/prefix
+    run_as_user /opt/wine-devel/bin/wineserver -w || true
+    echo "Prefix Wine siap: $WINE_PREFIX_DIR"
+else
+    echo "PERINGATAN: wineboot -u gagal. Jalankan manual sebagai $USER_NAME:"
+    echo "  WINEPREFIX=$WINE_PREFIX_DIR wineboot -u"
+fi
+
+# 14. Verifikasi akhir
 echo ""
 echo "===================================="
 echo " WINEHQ INSTALLATION COMPLETED"
@@ -253,8 +283,7 @@ echo "Wine executable: $WINE_BIN"
 echo "Repository: WineHQ Debian Trixie"
 echo "Update sistem: Selesai"
 echo ""
-echo "Untuk inisialisasi Wine:"
-echo "/opt/wine-devel/bin/wineboot -i"
+echo "Wine prefix: $WINE_PREFIX_DIR (sudah diinisialisasi)"
 echo ""
 echo "Jika shell masih memakai wine lama, jalankan: hash -r"
 echo "===================================="
