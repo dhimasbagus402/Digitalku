@@ -1,7 +1,8 @@
 #!/bin/bash
 # =====================================================================
 #  Install WineHQ terbaru + corefonts, vcrun2022, dotnet48, WebView2
-#  + double-click file .ex5/.mq5 langsung masuk ke MetaTrader (mt5-open)
+#  + double-click file .ex4/.ex5/.mq4/.mq5 langsung masuk ke MetaTrader
+#    (mt5-open + penjaga asosiasi mt5-assoc)
 #  Mendukung Debian / Ubuntu / turunan Ubuntu (Mint, Pop!_OS, dll.)
 #  Jalankan sebagai user biasa:  bash updatewine.sh
 # =====================================================================
@@ -48,7 +49,7 @@ sudo apt-get autoremove -y
 # ---------------------------------------------------------------------
 sudo dpkg --add-architecture i386
 sudo apt-get update
-sudo apt-get install -y wget ca-certificates cabextract unzip p7zip-full xz-utils zenity
+sudo apt-get install -y wget ca-certificates cabextract unzip p7zip-full xz-utils zenity yad inotify-tools libnotify-bin
 
 sudo mkdir -pm755 /etc/apt/keyrings
 sudo wget -qO /etc/apt/keyrings/winehq-archive.key https://dl.winehq.org/wine-builds/winehq.key
@@ -146,7 +147,10 @@ export WINEPREFIX="${WINEPREFIX:-$HOME/.wine}"
 export WINEDEBUG=-all
 DC="$WINEPREFIX/drive_c"
 
-err() { zenity --error --title="MT5 Open" --text="$1" 2>/dev/null || echo "$1" >&2; exit 1; }
+mkdir -p "$HOME/.cache"
+LOG="$HOME/.cache/mt5-open.log"
+echo "$(date '+%F %T') DIPANGGIL: $*" >> "$LOG"
+err() { echo "    ERROR: $1" >> "$LOG"; zenity --error --title="MT5 Open" --text="$1" 2>/dev/null || echo "$1" >&2; exit 1; }
 
 [[ $# -ge 1 ]] || err "Tidak ada file yang dibuka."
 command -v wine >/dev/null || err "Wine tidak ditemukan."
@@ -159,6 +163,8 @@ fi
 FILE="$(readlink -f "$ARG")"
 [[ -f "$FILE" ]] || err "File tidak ditemukan:\n$1"
 EXT="${FILE##*.}"; EXT="${EXT,,}"
+# Nama file aman untuk markup zenity (mis. "E&E POINTS")
+BN="$(basename "$FILE")"; BN="${BN//&/&amp;}"; BN="${BN//</&lt;}"; BN="${BN//>/&gt;}"
 
 # Tentukan jenis terminal & program yang dipakai
 case "$EXT" in
@@ -209,6 +215,44 @@ while [[ "$d" != "/" && -z "$OWNER" ]]; do
     d="$(dirname "$d")"
 done
 
+# Belum ketemu? Lihat siapa yang membuka jendela Explorer ini:
+# MT -> File > Open Data Folder -> explorer.exe -> (double-click) -> mt5-open
+# Telusuri proses induk sampai menemukan terminal/explorer milik sebuah MT.
+owner_from_dir() {   # $1 = folder Linux; cetak folder instalasi MT pemiliknya
+    local d="$1" o
+    while [[ -n "$d" && "$d" != "/" ]]; do
+        if [[ -f "$d/origin.txt" ]]; then
+            o="$(iconv -f UTF-16LE -t UTF-8 "$d/origin.txt" 2>/dev/null | tr -d '\r\n\357\273\277')"
+            [[ -n "$o" ]] && { readlink -f "$(winepath -u "$o" 2>/dev/null)"; return; }
+        elif [[ -f "$d/terminal64.exe" || -f "$d/terminal.exe" ]]; then
+            readlink -f "$d"; return
+        fi
+        d="$(dirname "$d")"
+    done
+}
+if [[ -z "$OWNER" ]]; then
+    pid=$PPID
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+        [[ -r /proc/$pid/cmdline ]] || break
+        mapfile -d '' -t CL < /proc/$pid/cmdline
+        for a in "${CL[@]}"; do
+            case "${a,,}" in
+                *\\terminal64.exe|*\\terminal.exe|*/terminal64.exe|*/terminal.exe)
+                    u="$a"; [[ "$u" =~ ^[A-Za-z]:\\ ]] && u="$(winepath -u "$u" 2>/dev/null)"
+                    OWNER="$(readlink -f "$(dirname "$u")")"; VIA="proses $pid" ;;
+                [a-z]:\\*)
+                    # argumen explorer.exe = folder yang dibuka (Data Folder)
+                    u="$(winepath -u "$a" 2>/dev/null)"
+                    [[ -d "$u" ]] && { o="$(owner_from_dir "$u")"; [[ -n "$o" ]] && OWNER="$o" VIA="explorer $pid"; } ;;
+            esac
+            [[ -n "$OWNER" ]] && break
+        done
+        [[ -n "$OWNER" ]] && break
+        pid="$(awk '{print $4}' /proc/$pid/stat 2>/dev/null)"
+        [[ -n "$pid" && "$pid" != 1 && "$pid" != 0 ]] || break
+    done
+fi
+
 # Pilih target
 SEL=()
 if [[ -n "$OWNER" ]]; then
@@ -230,7 +274,7 @@ else
     done
     [[ $EXT == ex? ]] && ROWS+=("all" "Semua terminal" "")
     CH="$(zenity --list --title="MT5 Open" \
-        --text="Buka <b>$(basename "$FILE")</b> di:" \
+        --text="Buka <b>$BN</b> di:" \
         --column="No" --column="MetaTrader" --column="Status" \
         --hide-column=1 --print-column=1 --width=420 --height=320 \
         "${ROWS[@]}" 2>/dev/null)" || exit 0
@@ -239,6 +283,104 @@ else
 fi
 
 WFILE="$(winepath -w "$FILE" 2>/dev/null)"
+mkdir -p "$HOME/.cache"
+{
+    echo "$(date '+%F %T') $(basename "$FILE")"
+    echo "    lokasi : $FILE"
+    echo "    pemilik: ${OWNER:-(tidak terdeteksi)} ${VIA:+(dari $VIA)}"
+    if [[ -z "$OWNER" ]]; then
+        q=$PPID
+        for _ in 1 2 3 4 5 6; do
+            [[ -r /proc/$q/cmdline ]] || break
+            echo "    induk  : $q $(tr '\0' ' ' < /proc/$q/cmdline | cut -c1-150)"
+            q="$(awk '{print $4}' /proc/$q/stat 2>/dev/null)"; [[ "$q" -gt 1 ]] 2>/dev/null || break
+        done
+    fi
+    for i in "${SEL[@]}"; do echo "    kirim  : ${NAMES[$i]}"; done
+} >> "$HOME/.cache/mt5-open.log"
+# ---------------------------------------------------------------------
+# .ex4 / .ex5: file disalin langsung ke folder MQL4/MQL5 milik terminal tujuan.
+# (MT4 tidak bisa mengimpor dari argumen; MT5 hanya berhasil sekali karena
+#  instance yang sudah berjalan mengabaikan kiriman berikutnya.)
+# Jenis ditanyakan lewat dialog kecil bila tidak bisa ditentukan otomatis.
+# ---------------------------------------------------------------------
+if [[ $EXT == ex4 || $EXT == ex5 ]]; then
+    if [[ $EXT == ex5 ]]; then MQ=MQL5; TT="MT5"; else MQ=MQL4; TT="MT4"; fi
+    NAME="$(basename "$FILE")"
+    MSG=""
+    for i in "${SEL[@]}"; do
+        inst="$(readlink -f "${DIRS[$i]}")"
+        # Data folder: AppData\...\Terminal\<kode> yang origin.txt-nya menunjuk ke instalasi ini
+        DATA=""
+        shopt -s nullglob
+        for o in "$DC"/users/*/AppData/Roaming/MetaQuotes/Terminal/*/origin.txt; do
+            p="$(iconv -f UTF-16LE -t UTF-8 "$o" 2>/dev/null | tr -d '\r\n\357\273\277')"
+            [[ -n "$p" && "$(readlink -f "$(winepath -u "$p" 2>/dev/null)")" == "$inst" ]] \
+                && DATA="$(dirname "$o")"
+        done
+        shopt -u nullglob
+        [[ -d "$DATA/$MQ" ]] || DATA="$inst"          # mode portable
+        M4="$DATA/$MQ"
+
+        # Tentukan jenis:
+        # 1) dari folder asal (…/Experts, …/Indicators, …/Scripts)
+        # 2) selain itu tanya lewat dialog kecil (Expert / Indicator / Script)
+        CAT=""
+        case "${FILE,,}" in
+            */experts/*)    CAT=Experts ;;
+            */indicators/*) CAT=Indicators ;;
+            */scripts/*)    CAT=Scripts ;;
+        esac
+        # Sudah pernah dipasang? tampilkan di dialog (tetap ditanya agar ada reaksi)
+        ADA=""
+        for c in Experts Indicators Scripts; do
+            [[ -f "$M4/$c/$NAME" ]] && ADA="$c"
+        done
+        if [[ -z "$CAT" ]]; then
+            # Dialog kecil di tengah layar: satu klik memilih jenis (Esc = batal)
+            if command -v yad >/dev/null; then
+                yad --center --on-top --fixed --borders=12 --title="$TT" \
+                    --window-icon=wine --image=dialog-question \
+                    --text="<b>$BN</b>${ADA:+\n<small>sudah ada di $ADA, akan ditimpa</small>}" \
+                    --button="Expert:10" --button="Indicator:11" --button="Script:12" \
+                    >/dev/null 2>&1
+                case $? in 10) ANS=Expert ;; 11) ANS=Indicator ;; 12) ANS=Script ;; *) ANS="" ;; esac
+            else
+                ANS="$(zenity --question --switch --no-wrap --title="$TT" \
+                        --text="<b>$BN</b>${ADA:+\n<small>sudah ada di $ADA, akan ditimpa</small>}" \
+                        --extra-button="Expert" --extra-button="Indicator" --extra-button="Script" \
+                        2>/dev/null)"
+            fi
+            case "$ANS" in
+                Expert)    CAT=Experts ;;
+                Indicator) CAT=Indicators ;;
+                Script)    CAT=Scripts ;;
+                *)         echo "    batal" >> "$LOG"; exit 0 ;;
+            esac
+        fi
+
+        # Pindah jenis? hapus salinan lama agar tidak dobel
+        [[ -n "$ADA" && "$ADA" != "$CAT" ]] && rm -f "$M4/$ADA/$NAME"
+
+        DEST="$M4/$CAT"
+        mkdir -p "$DEST"
+        if [[ "$(readlink -f "$FILE")" == "$(readlink -f "$DEST/$NAME")" ]]; then
+            MSG+="${NAMES[$i]}: sudah ada di $MQ/$CAT\n"
+        elif cp -f "$FILE" "$DEST/"; then
+            MSG+="${NAMES[$i]}: masuk ke $MQ/$CAT\n"
+        else
+            MSG+="${NAMES[$i]}: GAGAL menyalin\n"
+        fi
+        echo "    salin  : $DEST" >> "$LOG"
+
+        # Jalankan MT bila belum berjalan (file terbaca saat start)
+        if ! pgrep -f "${NAMES[$i]}\\\\terminal" >/dev/null; then
+            nohup wine "$(winepath -w "${DIRS[$i]}/$EXE")" >/dev/null 2>&1 &
+        fi
+    done
+    exit 0
+fi
+
 for i in "${SEL[@]}"; do
     WEXE="$(winepath -w "${DIRS[$i]}/$EXE" 2>/dev/null)"
     nohup wine "$WEXE" "$WFILE" >/dev/null 2>&1 &
@@ -353,6 +495,159 @@ else
     ASSOC="tidak tersimpan"; FAILED+=("asosiasi file .ex5")
 fi
 timeout 30 wineserver -w 2>/dev/null || wineserver -k
+
+# Penjaga asosiasi: installer MetaTrader menimpa asosiasi .ex4/.ex5 setiap kali
+# diinstal; mt5-assoc mengembalikannya otomatis saat registry Wine berubah.
+echo "=== Memasang penjaga asosiasi file ==="
+cat > "$BIN/mt5-assoc" <<'ASSOC'
+#!/bin/bash
+# mt5-assoc: pastikan .ex4/.ex5/.mq4/.mq5/.mqh di Wine selalu dibuka lewat mt5-open.
+# Installer MetaTrader menimpa asosiasi ini setiap kali dijalankan (di HKLM
+# maupun HKCU); script ini mengembalikannya. Hanya membaca file registry
+# (tanpa menyalakan Wine) kecuali memang ada yang perlu diperbaiki.
+export WINEPREFIX="${WINEPREFIX:-$HOME/.wine}"
+export WINEDEBUG=-all
+
+# Mode pantau: jalan terus di background, periksa ulang setiap registry berubah
+if [[ "${1:-}" == "--watch" ]]; then
+    exec 9>"${XDG_RUNTIME_DIR:-/tmp}/mt5-assoc-$UID.lock"
+    flock -n 9 || exit 0                       # sudah ada yang memantau
+    command -v inotifywait >/dev/null || exit 0
+    "$0"
+    while inotifywait -qq -e close_write,moved_to "$WINEPREFIX" 2>/dev/null \
+          || sleep 30; do
+        sleep 5                                # beri waktu wineserver menyimpan
+        "$0"
+    done
+    exit 0
+fi
+
+# --- Sisi Linux: cegah Wine membuat asosiasi .ex4/.ex5 sendiri ---------
+APPS="$HOME/.local/share/applications"
+MIMED="$HOME/.local/share/mime"
+CHG=0
+for e in ex4 ex5 mq4 mq5 mqh; do
+    for f in "$APPS/wine-extension-$e.desktop" "$MIMED/packages/x-wine-extension-$e.xml"; do
+        [[ -f "$f" ]] && { mv -f "$f" "$f.bak"; CHG=1; }
+    done
+done
+for t in application/x-mql-ex5 application/x-mql-ex4 text/x-mql5 text/x-mql4 text/x-mqh; do
+    [[ "$(xdg-mime query default "$t" 2>/dev/null)" == mt5-open.desktop ]] \
+        || { xdg-mime default mt5-open.desktop "$t" 2>/dev/null; CHG=1; }
+done
+if (( CHG )); then
+    update-mime-database "$MIMED" >/dev/null 2>&1
+    update-desktop-database "$APPS" >/dev/null 2>&1
+    mkdir -p "$HOME/.cache"
+    echo "$(date '+%F %T') asosiasi Linux diperbaiki" >> "$HOME/.cache/mt5-assoc.log"
+fi
+
+SYSREG="$WINEPREFIX/system.reg"     # HKLM\Software\Classes
+USRREG="$WINEPREFIX/user.reg"       # HKCU\Software\Classes (lebih diutamakan)
+LAUNCH="$HOME/.local/bin/mt5-open"
+[[ -f "$SYSREG" && -x "$LAUNCH" ]] || exit 0
+command -v wine >/dev/null || exit 0
+
+WLAUNCH="Z:${LAUNCH//\//\\}"
+CMD="\"$WLAUNCH\" \"%1\""
+
+# Nilai (Default) sebuah key; $1 = file .reg, $2 = key, mis. Software\Classes\.ex5
+# Hasil "<none>" bila key tidak ada sama sekali.
+reg_default() {
+    [[ -f "$1" ]] || { echo "<none>"; return; }
+    local hdr="[${2//\\/\\\\}]"
+    H="${hdr,,}" awk '
+        BEGIN                      { h = ENVIRON["H"]; found = 0 }
+        index(tolower($0), h) == 1 { f = 1; found = 1; next }
+        /^\[/                      { f = 0 }
+        f && /^@=/                 { sub(/^@="/, ""); sub(/"$/, ""); print; done = 1; exit }
+        END                        { if (!found) print "<none>" }
+    ' "$1"
+}
+
+FIX=()
+# Matikan pembuatan asosiasi file Linux oleh Wine (shortcut menu tetap dibuat)
+if ! grep -qi '^\[Software\\\\Wine\\\\FileOpenAssociations\]' "$USRREG" 2>/dev/null; then
+    FIX+=("_foa:")
+fi
+for ext in ex4 ex5 mq4 mq5 mqh; do
+    # ProgID efektif: HKCU menang atas HKLM
+    pu="$(reg_default "$USRREG" "Software\\Classes\\.$ext")"
+    ps="$(reg_default "$SYSREG" "Software\\Classes\\.$ext")"
+    progid="$pu"; [[ "$progid" == "<none>" || -z "$progid" ]] && progid="$ps"
+    [[ "$progid" == "<none>" || -z "$progid" ]] && progid="${ext^^}.File"
+
+    cu="$(reg_default "$USRREG" "Software\\Classes\\$progid\\shell\\open\\command")"
+    cs="$(reg_default "$SYSREG" "Software\\Classes\\$progid\\shell\\open\\command")"
+    ok=1
+    [[ "$cs" == *mt5-open* ]] || ok=0                         # HKLM harus benar
+    [[ "$cu" == "<none>" || "$cu" == *mt5-open* ]] || ok=0    # HKCU kosong atau benar
+    (( ok )) || FIX+=("$ext:$progid")
+done
+
+(( ${#FIX[@]} )) || exit 0
+mkdir -p "$HOME/.cache"
+
+for item in "${FIX[@]}"; do
+    ext="${item%%:*}"; progid="${item#*:}"
+    if [[ $ext == _foa ]]; then
+        wine reg add 'HKCU\Software\Wine\FileOpenAssociations' /v Enable /d N /f >/dev/null 2>&1
+        continue
+    fi
+    for HIVE in HKLM HKCU; do
+        wine reg add "$HIVE\\Software\\Classes\\.$ext" /ve /d "$progid" /f >/dev/null 2>&1
+        wine reg add "$HIVE\\Software\\Classes\\$progid\\shell\\open\\command" /ve /d "$CMD" /f >/dev/null 2>&1
+    done
+    echo "$(date '+%F %T') .$ext -> $progid diperbaiki (HKLM+HKCU)" >> "$HOME/.cache/mt5-assoc.log"
+done
+ASSOC
+chmod +x "$BIN/mt5-assoc"
+
+# Jalankan otomatis setiap kali registry Wine berubah (mis. setelah install MT baru)
+SYSD="$HOME/.config/systemd/user"
+mkdir -p "$SYSD" "$HOME/.cache"
+cat > "$SYSD/mt5-assoc.path" <<EOF
+[Unit]
+Description=Pantau registry Wine untuk asosiasi file MetaTrader
+
+[Path]
+PathChanged=$HOME/.wine/system.reg
+PathChanged=$HOME/.wine/user.reg
+Unit=mt5-assoc.service
+
+[Install]
+WantedBy=default.target
+EOF
+cat > "$SYSD/mt5-assoc.service" <<EOF
+[Unit]
+Description=Kembalikan asosiasi .ex4/.ex5 ke mt5-open
+
+[Service]
+Type=oneshot
+ExecStartPre=/bin/sleep 5
+ExecStart=$BIN/mt5-assoc
+EOF
+
+# Cadangan bila systemd --user tidak aktif: jalankan saat login desktop
+mkdir -p "$HOME/.config/autostart"
+cat > "$HOME/.config/autostart/mt5-assoc.desktop" <<EOF
+[Desktop Entry]
+Type=Application
+Name=MT5 file association guard
+Exec=$BIN/mt5-assoc --watch
+NoDisplay=true
+X-GNOME-Autostart-enabled=true
+EOF
+
+if systemctl --user daemon-reload 2>/dev/null && \
+   systemctl --user enable --now mt5-assoc.path 2>/dev/null; then
+    echo "    -> Penjaga asosiasi aktif (systemd --user)"
+else
+    # Tanpa systemd: pemantau inotify di background (otomatis lagi saat login)
+    nohup "$BIN/mt5-assoc" --watch >/dev/null 2>&1 &
+    echo "    -> Penjaga asosiasi aktif (inotify, otomatis saat login)"
+fi
+
 [[ "$WV2_POLICY" == "OK" ]] || FAILED+=("registry argumen webview2")
 
 # ---------------------------------------------------------------------
