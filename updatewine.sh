@@ -3,6 +3,9 @@
 #  Install WineHQ terbaru + corefonts, vcrun2022, dotnet48, WebView2
 #  + double-click file .ex4/.ex5/.mq4/.mq5 langsung masuk ke MetaTrader
 #    (mt5-open + penjaga asosiasi mt5-assoc)
+#  + backup MetaTrader (AppData\MetaQuotes + folder instalasi MT) lalu
+#    restore otomatis ke prefix baru, lalu backup dihapus.
+#    NO_BACKUP=1 = tanpa backup, KEEP_BACKUP=1 = simpan file backup.
 #  Mendukung Debian / Ubuntu / turunan Ubuntu (Mint, Pop!_OS, dll.)
 #  Jalankan sebagai user biasa:  bash updatewine.sh
 # =====================================================================
@@ -32,10 +35,52 @@ fi
 echo "Distro: $DISTRO $CODENAME | Wine: winehq-$WINE_BRANCH"
 
 # ---------------------------------------------------------------------
-# 1. Tutup Wine & hapus prefix lama
+# 1. Tutup Wine, BACKUP data MetaTrader, lalu hapus prefix lama
 # ---------------------------------------------------------------------
 wineserver -k 2>/dev/null || true
 sleep 2
+
+# Yang dibackup (relatif terhadap drive_c):
+#  - AppData\Roaming\MetaQuotes (data, EA, indikator, profil, akun)
+#  - folder instalasi MetaTrader saja di Program Files / Program Files (x86)
+#    (dikenali dari terminal.exe / terminal64.exe di dalamnya)
+BACKUP_DIR="${BACKUP_DIR:-$HOME/wine-backup}"
+BACKUP=""
+OLD_DC="$HOME/.wine/drive_c"
+if [[ "${NO_BACKUP:-0}" != 1 && -d "$OLD_DC" ]]; then
+    SRC=()
+    d="users/${USER:-$(id -un)}/AppData/Roaming/MetaQuotes"
+    [[ -d "$OLD_DC/$d" ]] && SRC+=("$d")
+    shopt -s nullglob nocaseglob
+    for t in "$OLD_DC/Program Files/"*/terminal64.exe "$OLD_DC/Program Files/"*/terminal.exe \
+             "$OLD_DC/Program Files (x86)/"*/terminal64.exe "$OLD_DC/Program Files (x86)/"*/terminal.exe; do
+        d="$(dirname "${t#$OLD_DC/}")"
+        [[ " ${SRC[*]} " == *" $d "* ]] || SRC+=("$d")
+    done
+    shopt -u nullglob nocaseglob
+    if (( ${#SRC[@]} )); then
+        mkdir -p "$BACKUP_DIR"
+        BACKUP="$BACKUP_DIR/wine-mt-$(date +%Y%m%d-%H%M%S).tar.gz"
+        # Cache WebView2 milik MT tidak ikut (dibuat ulang otomatis)
+        EXCL=(--exclude="*/temp/EBWebView")
+
+        echo "=== Backup data Wine ==="
+        printf '    %s\n' "${SRC[@]}"
+        SIZE="$(cd "$OLD_DC" && du -sch "${SRC[@]}" 2>/dev/null | tail -1 | cut -f1)"
+        FREE="$(df -h --output=avail "$BACKUP_DIR" | tail -1 | tr -d ' ')"
+        echo "    ukuran ~$SIZE, ruang kosong $FREE"
+        echo "    -> $BACKUP"
+
+        if ! tar -C "$OLD_DC" -czf "$BACKUP" "${EXCL[@]}" "${SRC[@]}" \
+           || ! tar -tzf "$BACKUP" >/dev/null 2>&1; then
+            echo "ERROR: Backup gagal. Prefix lama TIDAK dihapus, proses dihentikan."
+            rm -f "$BACKUP"
+            exit 1
+        fi
+        echo "    -> Backup OK ($(du -h "$BACKUP" | cut -f1))"
+    fi
+fi
+
 rm -rf ~/.wine
 
 # ---------------------------------------------------------------------
@@ -651,6 +696,33 @@ fi
 [[ "$WV2_POLICY" == "OK" ]] || FAILED+=("registry argumen webview2")
 
 # ---------------------------------------------------------------------
+# 8. Restore data MetaTrader dari backup ke prefix baru
+# ---------------------------------------------------------------------
+RESTORE="tidak ada backup"
+if [[ -n "$BACKUP" && -f "$BACKUP" ]]; then
+    echo "=== Restore data dari backup ==="
+    wineserver -k 2>/dev/null; sleep 2
+    if tar -C "$WINEPREFIX/drive_c" -xzf "$BACKUP" \
+       && tar -C "$WINEPREFIX/drive_c" -dzf "$BACKUP" >/dev/null 2>&1; then
+        RESTORE="OK"
+        echo "    -> Restore OK (isi terverifikasi sama dengan backup)"
+        # Backup dihapus hanya bila restore terverifikasi. KEEP_BACKUP=1 untuk menyimpan.
+        if [[ "${KEEP_BACKUP:-0}" != 1 ]]; then
+            rm -f "$BACKUP" && echo "    -> File backup dihapus"
+            rmdir "$BACKUP_DIR" 2>/dev/null
+            BACKUP=""
+        fi
+        # Jalankan penjaga asosiasi sekali (MT hasil restore tidak lewat installer)
+        [[ -x "$HOME/.local/bin/mt5-assoc" ]] && "$HOME/.local/bin/mt5-assoc"
+    else
+        RESTORE="GAGAL"
+        FAILED+=("restore backup")
+        echo "    -> GAGAL. File backup TIDAK dihapus. Restore manual:"
+        echo "       tar -C ~/.wine/drive_c -xzf \"$BACKUP\""
+    fi
+fi
+
+# ---------------------------------------------------------------------
 # Ringkasan
 # ---------------------------------------------------------------------
 WV2_DIR="$WINEPREFIX/drive_c/Program Files (x86)/Microsoft/EdgeWebView/Application"
@@ -665,6 +737,7 @@ echo "Wine     : $(wine --version)"
 echo "WebView2 : ${WV2_VER:-tidak terdeteksi}"
 echo "Argumen  : $WV2_POLICY (MetaTrader WebView2)"
 echo "Asosiasi : $ASSOC (.ex5/.mq5 -> mt5-open)"
+echo "Restore  : $RESTORE${BACKUP:+ ($BACKUP)}"
 echo "Log      : $LOG"
 if (( ${#FAILED[@]} )); then
     echo "GAGAL:"; printf '  - %s\n' "${FAILED[@]}"
