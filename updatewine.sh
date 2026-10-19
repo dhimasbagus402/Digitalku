@@ -3,7 +3,7 @@
 #  Install WineHQ terbaru + corefonts, vcrun2022, dotnet48, WebView2
 #  + double-click file .ex4/.ex5/.mq4/.mq5 langsung masuk ke MetaTrader
 #    (mt5-open + penjaga asosiasi mt5-assoc)
-#  + backup MetaTrader (AppData\MetaQuotes + folder instalasi MT) lalu
+#  + backup AppData\MetaQuotes + isi Program Files (selain bawaan Wine) lalu
 #    restore otomatis ke prefix baru, lalu backup dihapus.
 #    NO_BACKUP=1 = tanpa backup, KEEP_BACKUP=1 = simpan file backup.
 #  Mendukung Debian / Ubuntu / turunan Ubuntu (Mint, Pop!_OS, dll.)
@@ -41,30 +41,48 @@ wineserver -k 2>/dev/null || true
 sleep 2
 
 # Yang dibackup (relatif terhadap drive_c):
-#  - AppData\Roaming\MetaQuotes (data, EA, indikator, profil, akun)
-#  - folder instalasi MetaTrader saja di Program Files / Program Files (x86)
-#    (dikenali dari terminal.exe / terminal64.exe di dalamnya)
+#  - users/<user>/AppData/Roaming/MetaQuotes
+#  - SEMUA isi Program Files dan Program Files (x86), kecuali folder/file
+#    bawaan Wine di bawah ini (dibuat ulang oleh prefix baru).
+#    Ubah daftar ini bila perlu.
+SKIP_X86=("Windows NT" "Windows Media Player" "Microsoft.NET" "Microsoft" "Common Files" "Internet Explorer")
+SKIP_PF=("msedge_installer.log" "Windows NT" "Windows Media Player" "Common Files" "Internet Explorer")
 BACKUP_DIR="${BACKUP_DIR:-$HOME/wine-backup}"
 BACKUP=""
 OLD_DC="$HOME/.wine/drive_c"
+echo "=== Backup data Wine ==="
+if [[ "${NO_BACKUP:-0}" == 1 ]]; then
+    BKINFO="dilewati (NO_BACKUP=1)"
+elif [[ ! -d "$OLD_DC" ]]; then
+    BKINFO="tidak ada prefix lama ($OLD_DC)"
+else
+    BKINFO="tidak ada data untuk dibackup di prefix lama"
+fi
+[[ -d "$OLD_DC" && "${NO_BACKUP:-0}" != 1 ]] || echo "    $BKINFO"
 if [[ "${NO_BACKUP:-0}" != 1 && -d "$OLD_DC" ]]; then
     SRC=()
     d="users/${USER:-$(id -un)}/AppData/Roaming/MetaQuotes"
     [[ -d "$OLD_DC/$d" ]] && SRC+=("$d")
-    shopt -s nullglob nocaseglob
-    for t in "$OLD_DC/Program Files/"*/terminal64.exe "$OLD_DC/Program Files/"*/terminal.exe \
-             "$OLD_DC/Program Files (x86)/"*/terminal64.exe "$OLD_DC/Program Files (x86)/"*/terminal.exe; do
-        d="$(dirname "${t#$OLD_DC/}")"
-        [[ " ${SRC[*]} " == *" $d "* ]] || SRC+=("$d")
+    # skip_has <nama> <daftar...> : apakah nama ada di daftar (tanpa beda huruf besar/kecil)
+    skip_has() { local n="${1,,}" x; shift; for x in "$@"; do [[ "$n" == "${x,,}" ]] && return 0; done; return 1; }
+    shopt -s nullglob dotglob
+    for e in "$OLD_DC/Program Files/"*; do
+        n="$(basename "$e")"; skip_has "$n" "${SKIP_PF[@]}" || SRC+=("Program Files/$n")
     done
-    shopt -u nullglob nocaseglob
-    if (( ${#SRC[@]} )); then
+    for e in "$OLD_DC/Program Files (x86)/"*; do
+        n="$(basename "$e")"; skip_has "$n" "${SKIP_X86[@]}" || SRC+=("Program Files (x86)/$n")
+    done
+    shopt -u nullglob dotglob
+    if (( ${#SRC[@]} == 0 )); then
+        echo "    $BKINFO"
+        echo "    (dicari: users/${USER:-$(id -un)}/AppData/Roaming/MetaQuotes dan"
+        echo "     isi Program Files / Program Files (x86) selain folder bawaan Wine)"
+    else
         mkdir -p "$BACKUP_DIR"
         BACKUP="$BACKUP_DIR/wine-mt-$(date +%Y%m%d-%H%M%S).tar.gz"
         # Cache WebView2 milik MT tidak ikut (dibuat ulang otomatis)
         EXCL=(--exclude="*/temp/EBWebView")
 
-        echo "=== Backup data Wine ==="
         printf '    %s\n' "${SRC[@]}"
         SIZE="$(cd "$OLD_DC" && du -sch "${SRC[@]}" 2>/dev/null | tail -1 | cut -f1)"
         FREE="$(df -h --output=avail "$BACKUP_DIR" | tail -1 | tr -d ' ')"
@@ -78,6 +96,19 @@ if [[ "${NO_BACKUP:-0}" != 1 && -d "$OLD_DC" ]]; then
             exit 1
         fi
         echo "    -> Backup OK ($(du -h "$BACKUP" | cut -f1))"
+        BKINFO="OK, ${#SRC[@]} folder"
+    fi
+fi
+
+
+# Tidak ada backup baru (mis. run sebelumnya terhenti setelah prefix dihapus)?
+# Pakai backup terakhir yang masih ada di $BACKUP_DIR agar tetap di-restore.
+if [[ -z "$BACKUP" && "${NO_BACKUP:-0}" != 1 ]]; then
+    LAST="$(ls -t "$BACKUP_DIR"/wine-mt-*.tar.gz 2>/dev/null | head -1)"
+    if [[ -n "$LAST" ]] && tar -tzf "$LAST" >/dev/null 2>&1; then
+        BACKUP="$LAST"
+        BKINFO="memakai backup sebelumnya: $(basename "$LAST")"
+        echo "    $BKINFO"
     fi
 fi
 
@@ -737,6 +768,7 @@ echo "Wine     : $(wine --version)"
 echo "WebView2 : ${WV2_VER:-tidak terdeteksi}"
 echo "Argumen  : $WV2_POLICY (MetaTrader WebView2)"
 echo "Asosiasi : $ASSOC (.ex5/.mq5 -> mt5-open)"
+echo "Backup   : ${BKINFO:-?}"
 echo "Restore  : $RESTORE${BACKUP:+ ($BACKUP)}"
 echo "Log      : $LOG"
 if (( ${#FAILED[@]} )); then
