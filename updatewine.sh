@@ -10,8 +10,8 @@
 #  Jalankan sebagai user biasa:  bash updatewine.sh
 # =====================================================================
 
-# Cabang WineHQ: devel = versi terbaru, stable = versi stabil
-WINE_BRANCH="${WINE_BRANCH:-devel}"
+# Cabang WineHQ: stable = versi stabil (default), devel = versi terbaru
+WINE_BRANCH="${WINE_BRANCH:-stable}"
 
 set -uo pipefail
 
@@ -509,7 +509,7 @@ echo "=== Konfigurasi WebView2 & asosiasi file untuk Wine ==="
 MT5_OPEN_W="$(winepath -w "$BIN/mt5-open" 2>/dev/null)"
 MT5_OPEN_ESC="${MT5_OPEN_W//\\/\\\\}"
 
-WV2_ARGS="--no-sandbox --disable-gpu --disable-gpu-compositing --disable-direct-composition --disable-features=CalculateNativeWinOcclusion"
+WV2_ARGS="--no-sandbox --disable-gpu --disable-gpu-compositing --disable-direct-composition --disable-features=CalculateNativeWinOcclusion,RendererCodeIntegrity"
 WV2_KEY='Software\Policies\Microsoft\Edge\WebView2\AdditionalBrowserArguments'
 
 # Semua setting ditulis dalam satu file .reg -> satu kali start Wine
@@ -571,6 +571,84 @@ else
     ASSOC="tidak tersimpan"; FAILED+=("asosiasi file .ex5")
 fi
 timeout 30 wineserver -w 2>/dev/null || wineserver -k
+
+# ---------------------------------------------------------------------
+# mt5-link: tombol "Install / Open MetaTrader 5" di mql5.com (link mql5buy://)
+# diteruskan ke MT5 yang sedang terbuka.
+# ---------------------------------------------------------------------
+cat > "$BIN/mt5-link" <<'MTLINK'
+#!/bin/bash
+# mt5-link: buka link mql5buy:// (Market / Signals mql5.com) di MT5 yang tepat
+export WINEPREFIX="${WINEPREFIX:-$HOME/.wine}"
+export WINEDEBUG=-all
+DC="$WINEPREFIX/drive_c"
+LOG="$HOME/.cache/mt5-open.log"; mkdir -p "$HOME/.cache"
+URL="${1:-}"
+echo "$(date '+%F %T') LINK: $URL" >> "$LOG"
+
+err() { echo "    ERROR: $1" >> "$LOG"
+        yad --center --on-top --title="MT5" --text="$1" --button=OK 2>/dev/null \
+        || zenity --error --text="$1" 2>/dev/null; exit 1; }
+[[ "$URL" == mql5buy:* || "$URL" == mql5:* ]] || err "Link tidak dikenal:\n$URL"
+
+# 1) MT5 yang sedang berjalan (dibaca dari proses Wine)
+RUN=()
+while read -r pid; do
+    mapfile -d '' -t CL < "/proc/$pid/cmdline" 2>/dev/null
+    for a in "${CL[@]}"; do
+        if [[ "${a,,}" == *terminal64.exe ]]; then
+            u="$a"; [[ "$u" =~ ^[A-Za-z]:\\ ]] && u="$(winepath -u "$u" 2>/dev/null)"
+            d="$(readlink -f "$(dirname "$u")")"
+            [[ -d "$d" && " ${RUN[*]} " != *" $d "* ]] && RUN+=("$d")
+            break
+        fi
+    done
+done < <(pgrep -f -i 'terminal64\.exe')
+
+# 2) Semua MT5 yang terpasang
+ALL=()
+shopt -s nullglob nocaseglob
+for t in "$DC/Program Files/"*/terminal64.exe "$DC/Program Files (x86)/"*/terminal64.exe; do
+    ALL+=("$(readlink -f "$(dirname "$t")")")
+done
+shopt -u nullglob nocaseglob
+
+if   (( ${#RUN[@]} == 1 )); then TARGET="${RUN[0]}"
+else
+    LIST=("${RUN[@]}"); (( ${#LIST[@]} )) || LIST=("${ALL[@]}")
+    (( ${#LIST[@]} )) || err "Tidak ada MetaTrader 5 di $WINEPREFIX"
+    if (( ${#LIST[@]} == 1 )); then TARGET="${LIST[0]}"
+    else
+        ROWS=(); for d in "${LIST[@]}"; do ROWS+=("$(basename "$d")"); done
+        CH="$(yad --list --center --on-top --title="MT5" --width=360 --height=260 \
+                --text="Buka di MetaTrader:" --column="Terminal" --no-headers \
+                --print-column=1 --separator="" "${ROWS[@]}" 2>/dev/null)" || exit 0
+        [[ -n "$CH" ]] || exit 0
+        for d in "${LIST[@]}"; do [[ "$(basename "$d")" == "$CH" ]] && TARGET="$d"; done
+    fi
+fi
+[[ -n "${TARGET:-}" ]] || exit 0
+
+echo "    kirim  : $(basename "$TARGET")" >> "$LOG"
+nohup wine "$(winepath -w "$TARGET/terminal64.exe")" "$URL" >/dev/null 2>&1 &
+MTLINK
+chmod +x "$BIN/mt5-link"
+
+mkdir -p "$HOME/.local/share/applications"
+cat > "$HOME/.local/share/applications/mt5-link.desktop" <<EOF
+[Desktop Entry]
+Type=Application
+Name=MetaTrader 5 (link mql5.com)
+Exec=$BIN/mt5-link %u
+Icon=wine
+Terminal=false
+NoDisplay=true
+MimeType=x-scheme-handler/mql5buy;x-scheme-handler/mql5;
+EOF
+xdg-mime default mt5-link.desktop x-scheme-handler/mql5buy 2>/dev/null
+xdg-mime default mt5-link.desktop x-scheme-handler/mql5 2>/dev/null
+update-desktop-database "$HOME/.local/share/applications" >/dev/null 2>&1
+echo "    -> Link mql5buy:// -> $BIN/mt5-link"
 
 # Penjaga asosiasi: installer MetaTrader menimpa asosiasi .ex4/.ex5 setiap kali
 # diinstal; mt5-assoc mengembalikannya otomatis saat registry Wine berubah.
